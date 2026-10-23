@@ -1,0 +1,20 @@
+[package]
+name = "recon-kit"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Bank statement types and a matching engine for reconciling statements against a ledger — no format parsing, no floats, no silent auto-matching"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/WyattAu/recon-kit"
+keywords = ["accounting", "banking", "reconciliation", "finance", "ledger"]
+categories = ["finance", "data-structures"]
+exclude = ["/target"]
+
+[dev-dependencies]
+double-entry = "=0.1.0"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"
