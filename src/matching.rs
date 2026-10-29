@@ -1,33 +1,8 @@
 //! The matching engine: statements against ledger entries.
-//!
-//! Two passes, in order of trust:
-//!
-//! 1. [`match_exact`] — amount, direction, and booking date all equal. Not a
-//!    proposal; this *is* the match, the way two copies of the same fact
-//!    match.
-//! 2. [`match_window`] — amount and direction equal, dates within a window
-//!    (the card transaction that clears two days after it posts). This returns
-//!    [`Proposal`]s, and where more than one entry is equally plausible for a
-//!    line, [`Proposal::Ambiguous`] — the case a silent heuristic would
-//!    resolve by picking first, which is how money gets misattributed in the
-//!    books while the reconciliation still balances.
-//!
-//! Both passes are **injective**: a line is matched to at most one entry and
-//! an entry absorbs at most one line. The functions filter out anything
-//! already claimed, so running exact-then-window cannot double-take.
-//!
-//! One-to-one only, by design: a bank line that nets three ledger entries
-//! (fees batched, split deposits) needs a grouping rule that belongs to the
-//! operator, not a default that guesses. The crate's error is on the side of
-//! "unmatched, awaiting review" — never "matched, possibly wrongly".
 
 use crate::{Direction, StatementLine, days_between};
 
 /// The ledger's view of one booking, as reconciliation sees it.
-///
-/// The caller derives these from journal lines; a `double-entry` amount
-/// already carries direction as a side, so nothing here re-derives it from a
-/// sign.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerSide {
     /// The journal entry's id, so a confirmed match can be recorded.
@@ -38,6 +13,9 @@ pub struct LedgerSide {
     pub amount: u64,
     /// Which way the money moved, from the account holder's perspective.
     pub direction: Direction,
+    /// The journal line's memo or narration, for reference-substring
+    /// proposals.
+    pub memo: String,
 }
 
 /// A confirmed match: one statement line, one ledger entry, same money.
@@ -66,10 +44,6 @@ pub enum Proposal {
 }
 
 /// Amount and direction equal, date equal: not a guess.
-///
-/// Lines and entries already claimed by `taken_line_ids` / `taken_entry_ids`
-/// are skipped, so this can be re-run after the operator confirms a batch
-/// without re-matching confirmed work. Idempotent by construction.
 pub fn match_exact(
     lines: &[StatementLine],
     entries: &[LedgerSide],
@@ -105,11 +79,6 @@ pub fn match_exact(
 }
 
 /// Amount and direction equal, dates within `window_days`: a proposal.
-///
-/// The window exists because clearing is not instant — a card transaction
-/// posts on Friday and books on Sunday. A wider window produces more
-/// ambiguity, not more matches: ambiguity is the honest output when two
-/// entries are equally plausible.
 pub fn match_window(
     lines: &[StatementLine],
     entries: &[LedgerSide],
@@ -149,9 +118,6 @@ pub fn match_window(
                 }));
             }
             _ => {
-                // Closest to the line's date first, ties by entry id: a
-                // deterministic order, so the same situation always presents
-                // the same list.
                 candidates.sort_by(|a, b| {
                     a.1.abs()
                         .cmp(&b.1.abs())
@@ -163,6 +129,64 @@ pub fn match_window(
                         .into_iter()
                         .map(|(e, _)| e.entry_id.clone())
                         .collect(),
+                });
+            }
+        }
+    }
+    proposals
+}
+
+/// Reference-substring proposal: a statement line's memo matches an entry's
+/// memo or narration by substring containment, with amount and direction
+/// also equal. The date is NOT required to match — references survive
+/// clearing delays of any length.
+///
+/// At most one proposal per line: if two entries' memos both contain the
+/// line's reference, the result is ambiguous, not a coin flip. Only fires
+/// when the reference is non-trivial (at least 4 characters), because a
+/// one-character substring match is noise, not a proposal.
+pub fn match_reference(
+    lines: &[StatementLine],
+    entries: &[LedgerSide],
+    taken_line_ids: &std::collections::HashSet<String>,
+    taken_entry_ids: &std::collections::HashSet<String>,
+) -> Vec<Proposal> {
+    const MIN_REFERENCE_LEN: usize = 4;
+    let mut proposals = Vec::new();
+    let mut claimed_entries: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for line in lines {
+        if taken_line_ids.contains(&line.id) {
+            continue;
+        }
+        let reference = &line.description;
+        if reference.len() < MIN_REFERENCE_LEN {
+            continue;
+        }
+        let candidates: Vec<&LedgerSide> = entries
+            .iter()
+            .filter(|e| {
+                !taken_entry_ids.contains(&e.entry_id)
+                    && !claimed_entries.contains(e.entry_id.as_str())
+            })
+            .filter(|e| e.amount == line.amount && e.direction == line.direction)
+            .filter(|e| e.memo.contains(reference.as_str()) || reference.contains(e.memo.as_str()))
+            .collect();
+
+        match candidates.len() {
+            0 => {}
+            1 => {
+                if let Some(entry) = candidates.first() {
+                    claimed_entries.insert(entry.entry_id.as_str());
+                    proposals.push(Proposal::Match(Match {
+                        line_id: line.id.clone(),
+                        entry_id: entry.entry_id.clone(),
+                    }));
+                }
+            }
+            _ => {
+                proposals.push(Proposal::Ambiguous {
+                    line_id: line.id.clone(),
+                    candidates: candidates.iter().map(|e| e.entry_id.clone()).collect(),
                 });
             }
         }
@@ -193,6 +217,7 @@ mod tests {
             booked_on: on.into(),
             amount,
             direction,
+            memo: String::new(),
         }
     }
 
@@ -210,9 +235,9 @@ mod tests {
         let entries = vec![entry("JE-1", "2026-07-02", 5_000, Direction::Credit)];
         let matches = match_exact(&lines, &entries, &empty(), &empty());
         assert_eq!(matches.len(), 1, "direction and date must both gate");
-        let the_match = matches.first().expect("length asserted");
-        assert_eq!(the_match.line_id, "S1");
-        assert_eq!(the_match.entry_id, "JE-1");
+        let m = matches.first().expect("length asserted");
+        assert_eq!(m.line_id, "S1");
+        assert_eq!(m.entry_id, "JE-1");
     }
 
     #[test]
@@ -222,10 +247,8 @@ mod tests {
             line("S2", "2026-07-02", 5_000, Direction::Credit),
         ];
         let entries = vec![entry("JE-1", "2026-07-02", 5_000, Direction::Credit)];
-        // Exact pass takes JE-1 for S1.
         let exact = match_exact(&lines, &entries, &empty(), &empty());
         assert_eq!(exact.len(), 1);
-        // The window pass must not re-take it for S2, which is equally close.
         let taken_entries: HashSet<String> = exact.iter().map(|m| m.entry_id.clone()).collect();
         let taken_lines: HashSet<String> = exact.iter().map(|m| m.line_id.clone()).collect();
         let proposals = match_window(&lines, &entries, 3, &taken_lines, &taken_entries);
@@ -272,17 +295,14 @@ mod tests {
             entry("JE-A", "2026-07-09", 700, Direction::Debit),
             entry("JE-B", "2026-07-12", 700, Direction::Debit),
         ];
-        // Tight window: JE-A is one day off, JE-B two — only JE-A is in range.
         let tight = match_window(&lines, &entries, 1, &empty(), &empty());
         assert_eq!(
-            tight,
-            vec![Proposal::Match(Match {
+            tight.first().expect("length asserted"),
+            &Proposal::Match(Match {
                 line_id: "S1".into(),
                 entry_id: "JE-A".into()
-            })]
+            })
         );
-        // Wider window: both are in range, so the answer is ambiguity. A
-        // symmetric window cannot separate entries equidistant on either side.
         let wide = match_window(&lines, &entries, 2, &empty(), &empty());
         assert!(matches!(
             wide.first().expect("length asserted"),
@@ -306,5 +326,50 @@ mod tests {
         let taken_entries: HashSet<String> = first.iter().map(|m| m.entry_id.clone()).collect();
         let second = match_exact(&lines, &entries, &taken_lines, &taken_entries);
         assert!(second.is_empty(), "confirmed work is not re-matched");
+    }
+
+    #[test]
+    fn reference_matching_proposes_on_memo_containment() {
+        let lines = vec![StatementLine {
+            id: "FIT-R1".into(),
+            booked_on: "2026-07-04".into(),
+            amount: 55_000,
+            direction: Direction::Credit,
+            description: "BANK TRANSFER re PAYMENT INV-071".into(),
+        }];
+        let entries = vec![LedgerSide {
+            entry_id: "JE-INV071".into(),
+            booked_on: "2026-07-10".into(),
+            amount: 55_000,
+            direction: Direction::Credit,
+            memo: "BANK TRANSFER re PAYMENT INV-071".into(),
+        }];
+        let empty = HashSet::new();
+        let proposals = match_reference(&lines, &entries, &empty, &empty);
+        assert_eq!(proposals.len(), 1, "one reference-substring proposal");
+    }
+
+    #[test]
+    fn a_short_reference_is_noise_not_a_proposal() {
+        let lines = vec![StatementLine {
+            id: "FIT-S1".into(),
+            booked_on: "2026-07-02".into(),
+            amount: 1_000,
+            direction: Direction::Credit,
+            description: "x".into(),
+        }];
+        let entries = vec![LedgerSide {
+            entry_id: "JE-X".into(),
+            booked_on: "2026-07-02".into(),
+            amount: 1_000,
+            direction: Direction::Credit,
+            memo: "contains x".into(),
+        }];
+        let empty = HashSet::new();
+        let proposals = match_reference(&lines, &entries, &empty, &empty);
+        assert!(
+            proposals.is_empty(),
+            "one character is noise, not a reference"
+        );
     }
 }

@@ -5,6 +5,25 @@ Changelog](https://keepachangelog.com/) — versions follow [semver](https://sem
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-28
+
+### Added
+
+- `match_reference` — reference-substring proposal matching: a statement
+  line's memo and an entry's memo must overlap by substring containment,
+  with amount and direction also equal. The date is NOT required to match
+  (references survive clearing delays). At most one proposal per line;
+  two candidates means ambiguous. Minimum reference length 4 characters
+  (one character is noise, not a reference).
+- `LedgerSide` gains a `memo` field for the reference-matching surface.
+
+### Changed
+
+- **0.2.0 breaking**: `LedgerSide` gains `memo: String`. Callers that
+  construct `LedgerSide` directly must supply the field; the ledger's
+  memo is what reference matching reads.
+
+
 ## [0.1.0] - 2026-10-07
 
 Initial release.

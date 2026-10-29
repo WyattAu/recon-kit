@@ -94,6 +94,7 @@ fn post_month(ledger: &mut Ledger) -> Vec<LedgerSide> {
             booked_on: date.into(),
             amount,
             direction,
+            memo: String::new(),
         });
     }
     sides
@@ -279,4 +280,54 @@ fn a_reimport_of_the_same_statement_matches_the_same_way() {
     let taken_entries: HashSet<String> = first.iter().map(|m| m.entry_id.clone()).collect();
     let again = match_exact(&statement.lines, &entries, &taken_lines, &taken_entries);
     assert!(again.is_empty(), "confirmed work is never re-matched");
+}
+
+#[test]
+fn reference_substring_proposal_on_memo_match() {
+    // The bank's narration "PAYMENT INV-071" contains "INV-071", which also
+    // appears in the ledger entry's memo. Reference matching proposes the
+    // pair without requiring the date to agree.
+    let lines = vec![StatementLine {
+        id: "FIT-R1".into(),
+        booked_on: "2026-07-04".into(),
+        amount: 55_000,
+        direction: Direction::Credit,
+        description: "BANK TRANSFER re PAYMENT INV-071".into(),
+    }];
+    let entries = vec![LedgerSide {
+        entry_id: "JE-INV071".into(),
+        booked_on: "2026-07-10".into(),
+        amount: 55_000,
+        direction: Direction::Credit,
+        memo: "BANK TRANSFER re PAYMENT INV-071".into(),
+    }];
+    let empty = HashSet::new();
+    let proposals = recon_kit::match_reference(&lines, &entries, &empty, &empty);
+    assert_eq!(proposals.len(), 1, "one reference-substring proposal");
+}
+
+#[test]
+fn a_one_character_reference_is_noise_not_a_proposal() {
+    // The minimum reference length exists because a single-character
+    // substring match matches everything: the proposal would be noise.
+    let lines = vec![StatementLine {
+        id: "FIT-S1".into(),
+        booked_on: "2026-07-02".into(),
+        amount: 1_000,
+        direction: Direction::Credit,
+        description: "x".into(),
+    }];
+    let entries = vec![LedgerSide {
+        entry_id: "JE-X".into(),
+        booked_on: "2026-07-02".into(),
+        amount: 1_000,
+        direction: Direction::Credit,
+        memo: "contains x".into(),
+    }];
+    let empty = HashSet::new();
+    let proposals = recon_kit::match_reference(&lines, &entries, &empty, &empty);
+    assert!(
+        proposals.is_empty(),
+        "one character is noise, not a reference"
+    );
 }

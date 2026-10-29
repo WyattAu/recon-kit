@@ -42,7 +42,7 @@
 
 mod matching;
 
-pub use matching::{LedgerSide, Match, Proposal, match_exact, match_window};
+pub use matching::{LedgerSide, Match, Proposal, match_exact, match_reference, match_window};
 
 /// Which way the money moved, from the account holder's perspective.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
